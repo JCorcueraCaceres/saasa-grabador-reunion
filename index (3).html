@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SAASA · Grabador de Reunión</title>
+<style>
+  :root{
+    --navy:#17395e;--navy2:#0f2946;--bg:#f3f6f9;--card:#fff;
+    --text:#1f2937;--muted:#64748b;--line:#dbe3ec;
+    --red:#b42318;--green:#137044;--greenbg:#e9f7ef;--amber:#a85d00;--amberbg:#fff4dc;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--text)}
+  .top{background:linear-gradient(90deg,var(--navy2),var(--navy));color:#fff;padding:18px 22px}
+  .top h1{margin:0;font-size:20px}.top p{margin:5px 0 0;opacity:.8;font-size:12px}
+  .wrap{max-width:900px;margin:24px auto;padding:0 16px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px;box-shadow:0 8px 24px rgba(15,41,70,.10)}
+  .status{display:flex;justify-content:space-between;gap:15px;align-items:center;flex-wrap:wrap}
+  .mic{width:78px;height:78px;border-radius:50%;border:0;background:var(--red);color:white;font-size:32px;cursor:pointer}
+  .mic.rec{animation:pulse 1.3s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(180,35,24,.35)}70%{box-shadow:0 0 0 18px rgba(180,35,24,0)}100%{box-shadow:0 0 0 0 rgba(180,35,24,0)}}
+  .timer{font-size:36px;font-weight:850}
+  .small{font-size:12px;color:var(--muted)}
+  .pill{display:inline-block;padding:6px 10px;border-radius:999px;font-size:11px;font-weight:800;background:var(--amberbg);color:var(--amber)}
+  .pill.ok{background:var(--greenbg);color:var(--green)}
+  .pill.bad{background:#fdeceb;color:var(--red)}
+  .transcript{margin-top:16px;background:#f8fafc;border:1px solid var(--line);border-radius:10px;min-height:240px;max-height:420px;overflow:auto;padding:12px}
+  .line{padding:8px 0;border-bottom:1px dashed #dfe6ee;font-size:13px;line-height:1.45}
+  .line b{color:var(--navy)}
+  .actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}
+  button.action{border:1px solid var(--line);border-radius:9px;padding:10px 14px;font-weight:800;cursor:pointer;background:#fff}
+  button.primary{background:var(--navy);color:#fff;border-color:var(--navy)}
+  button.danger{background:var(--red);color:#fff;border-color:var(--red)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .note{margin-top:14px;padding:10px;border:1px dashed #bac7d5;border-radius:9px;font-size:11px;color:#475569}
+</style>
+</head>
+<body>
+  <div class="top">
+    <h1>SAASA · Grabador de Reunión</h1>
+    <p>Control de Prioridades de Mantenimiento</p>
+  </div>
+
+  <div class="wrap">
+    <div class="card">
+      <div class="status">
+        <div style="display:flex;gap:16px;align-items:center">
+          <button id="micBtn" class="mic" onclick="startRecording()">🎙</button>
+          <div>
+            <div id="timer" class="timer">00:00:00</div>
+            <div id="state" class="small">Listo para iniciar</div>
+          </div>
+        </div>
+        <div>
+          <div id="micStatus" class="pill">Micrófono: pendiente</div>
+          <div id="speechStatus" class="pill">Transcripción: pendiente</div>
+        </div>
+      </div>
+
+      <div id="transcript" class="transcript">
+        <div class="small">La transcripción aparecerá aquí cuando inicies la grabación.</div>
+      </div>
+
+      <div class="actions">
+        <button id="startBtn" class="action primary" onclick="startRecording()">▶ Iniciar</button>
+        <button id="stopBtn" class="action danger" onclick="stopRecording()" disabled>■ Finalizar</button>
+        <button class="action" onclick="window.close()">Cerrar ventana</button>
+      </div>
+
+      <div class="note">
+        Esta ventana envía el audio y la transcripción a la Web de Control de Prioridades mediante <b>postMessage</b>.
+        Mantén abierta la web principal durante toda la reunión.
+      </div>
+    </div>
+  </div>
+
+<script>
+let stream=null, recorder=null, recognition=null, startedAt=null, timerInt=null, seq=0, chunkStart=0, active=false;
+
+function post(type,payload){
+  if(window.opener){
+    window.opener.postMessage({source:'SAASA_RECORDER',type,payload}, '*');
+  }
+}
+
+function fmt(sec){
+  const h=String(Math.floor(sec/3600)).padStart(2,'0');
+  const m=String(Math.floor((sec%3600)/60)).padStart(2,'0');
+  const s=String(sec%60).padStart(2,'0');
+  return `${h}:${m}:${s}`;
+}
+
+function tick(){
+  const sec=Math.floor((Date.now()-startedAt)/1000);
+  document.getElementById('timer').textContent=fmt(sec);
+}
+
+function addLine(time,text){
+  const box=document.getElementById('transcript');
+  const d=document.createElement('div');
+  d.className='line';
+  d.innerHTML=`<b>${time}</b> · ${escapeHtml(text)}`;
+  box.appendChild(d);
+  box.scrollTop=box.scrollHeight;
+}
+
+function escapeHtml(s){
+  return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
+}
+
+async function startRecording(){
+  if(active) return;
+
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({audio:true});
+    document.getElementById('micStatus').textContent='Micrófono: ACTIVO';
+    document.getElementById('micStatus').className='pill ok';
+  }catch(e){
+    document.getElementById('micStatus').textContent='Micrófono: BLOQUEADO';
+    document.getElementById('micStatus').className='pill bad';
+    alert('No se pudo acceder al micrófono. Revisa el permiso del navegador.');
+    return;
+  }
+
+  active=true;
+  startedAt=Date.now();
+  chunkStart=Date.now();
+  seq=0;
+  document.getElementById('state').textContent='Grabando';
+  document.getElementById('micBtn').classList.add('rec');
+  document.getElementById('startBtn').disabled=true;
+  document.getElementById('stopBtn').disabled=false;
+  timerInt=setInterval(tick,1000);
+
+  startMediaRecorder();
+  startSpeechRecognition();
+  post('RECORDER_STARTED',{startedAt:Date.now()});
+}
+
+function startMediaRecorder(){
+  if(!window.MediaRecorder){
+    alert('Este navegador no soporta MediaRecorder.');
+    return;
+  }
+
+  let opts={};
+  if(MediaRecorder.isTypeSupported('audio/webm;codecs=opus')){
+    opts={mimeType:'audio/webm;codecs=opus'};
+  }else if(MediaRecorder.isTypeSupported('audio/webm')){
+    opts={mimeType:'audio/webm'};
+  }
+
+  recorder=new MediaRecorder(stream,opts);
+
+  recorder.ondataavailable=e=>{
+    if(!e.data || !e.data.size) return;
+
+    const reader=new FileReader();
+    reader.onloadend=()=>{
+      seq++;
+      const durationSec=Math.round((Date.now()-chunkStart)/1000);
+      chunkStart=Date.now();
+      const base64=String(reader.result).split(',')[1];
+
+      post('AUDIO_CHUNK',{
+        base64,
+        mimeType:e.data.type || recorder.mimeType || 'audio/webm',
+        sequence:seq,
+        durationSec
+      });
+    };
+    reader.readAsDataURL(e.data);
+  };
+
+  // Envía un bloque cada 60 segundos
+  recorder.start(60000);
+}
+
+function startSpeechRecognition(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){
+    document.getElementById('speechStatus').textContent='Transcripción: NO DISPONIBLE';
+    document.getElementById('speechStatus').className='pill bad';
+    post('SPEECH_UNAVAILABLE',{});
+    return;
+  }
+
+  recognition=new SR();
+  recognition.lang='es-PE';
+  recognition.continuous=true;
+  recognition.interimResults=false;
+
+  recognition.onstart=()=>{
+    document.getElementById('speechStatus').textContent='Transcripción: ACTIVA';
+    document.getElementById('speechStatus').className='pill ok';
+  };
+
+  recognition.onresult=e=>{
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      if(!e.results[i].isFinal) continue;
+      const text=e.results[i][0].transcript.trim();
+      const elapsed=fmt(Math.floor((Date.now()-startedAt)/1000));
+      addLine(elapsed,text);
+
+      post('TRANSCRIPT_SEGMENT',{
+        time:elapsed,
+        text,
+        confidence:e.results[i][0].confidence||''
+      });
+    }
+  };
+
+  recognition.onerror=e=>{
+    document.getElementById('speechStatus').textContent='Transcripción: ERROR';
+    document.getElementById('speechStatus').className='pill bad';
+    post('SPEECH_ERROR',{error:e.error});
+  };
+
+  recognition.onend=()=>{
+    if(active){
+      try{recognition.start()}catch(e){}
+    }
+  };
+
+  try{recognition.start()}catch(e){}
+}
+
+function stopRecording(){
+  if(!active) return;
+  active=false;
+
+  clearInterval(timerInt);
+  if(recognition){try{recognition.stop()}catch(e){}}
+  if(recorder && recorder.state!=='inactive'){try{recorder.stop()}catch(e){}}
+  if(stream){stream.getTracks().forEach(t=>t.stop())}
+
+  document.getElementById('state').textContent='Grabación finalizada';
+  document.getElementById('micBtn').classList.remove('rec');
+  document.getElementById('startBtn').disabled=false;
+  document.getElementById('stopBtn').disabled=true;
+
+  post('RECORDER_STOPPED',{
+    durationSec:Math.floor((Date.now()-startedAt)/1000)
+  });
+}
+</script>
+</body>
+</html>
